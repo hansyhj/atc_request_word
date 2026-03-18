@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import logging
 import re
 import tempfile
 import zipfile
@@ -18,9 +17,6 @@ import xml.etree.ElementTree as ET
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-log = logging.getLogger(__name__)
-
 
 TEMPLATE_MAIN_CT = "application/vnd.openxmlformats-officedocument.wordprocessingml.template.main+xml"
 DOC_MAIN_CT = "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"
@@ -33,31 +29,16 @@ class Proto:
     rpr_xml: object | None
 
 
-def _validate_inputs(template: Path, content: Path) -> None:
-    if not template.exists():
-        raise FileNotFoundError(f"模板文件不存在：{template}")
-    if template.suffix.lower() != ".dotx":
-        raise ValueError(f"模板文件必须是 .dotx 格式，当前：{template.suffix}")
-    if not content.exists():
-        raise FileNotFoundError(f"内容 JSON 不存在：{content}")
-
-
 def _load_json(path: Path) -> dict:
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as e:
-        raise ValueError(f"JSON 格式错误（{path}）：{e}") from e
-    if not isinstance(data, dict):
-        raise ValueError(f"JSON 顶层必须是对象，当前类型：{type(data).__name__}")
-    return data
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _dotx_to_docx(dotx: Path, tmpdir: Path) -> Path:
+def _dotx_to_docx(dotx: Path) -> Path:
     """
     python-docx does not open .dotx directly (template content-type).
     Convert by patching [Content_Types].xml and writing a temp .docx.
-    tmpdir is managed by the caller (use tempfile.TemporaryDirectory).
     """
+    tmpdir = Path(tempfile.mkdtemp(prefix="atc_dotx_"))
     out = tmpdir / (dotx.stem + ".docx")
     with zipfile.ZipFile(dotx, "r") as zin, zipfile.ZipFile(
         out, "w", compression=zipfile.ZIP_DEFLATED
@@ -130,8 +111,9 @@ def _add_para(doc: Document, proto: Proto, text: str, *, keep_whitespace: bool =
     if proto.p_style:
         try:
             p.style = doc.styles[proto.p_style]
-        except KeyError:
-            log.warning("样式 '%s' 在输出文档中不存在，已降级为默认样式", proto.p_style)
+        except Exception:
+            # Fall back silently if style name not found in the output doc.
+            pass
 
     if proto.ppr_xml is not None:
         # Replace paragraph properties
@@ -157,13 +139,8 @@ def main() -> None:
     ap.add_argument("--out", required=True, type=Path, help="Output .docx path")
     args = ap.parse_args()
 
-    _validate_inputs(args.template, args.content)
-    log.info("模板：%s", args.template)
-    log.info("内容：%s", args.content)
-
-    with tempfile.TemporaryDirectory(prefix="atc_dotx_") as _tmpdir:
-        template_docx = _dotx_to_docx(args.template, Path(_tmpdir))
-        tpl = Document(str(template_docx))
+    template_docx = _dotx_to_docx(args.template)
+    tpl = Document(str(template_docx))
 
     # Pick paragraph prototypes by matching typical patterns from the provided template:
     # title: first non-empty paragraph
@@ -262,14 +239,10 @@ def main() -> None:
     if dt_raw:
         # accept ISO yyyy-mm-dd
         try:
-            parts = dt_raw.split("-")
-            if len(parts) != 3:
-                raise ValueError(f"日期格式错误，应为 yyyy-mm-dd，当前：{dt_raw!r}")
-            y, m0, d0 = [int(x) for x in parts]
+            y, m0, d0 = [int(x) for x in dt_raw.split("-")]
             dt = date(y, m0, d0)
             _add_para(tpl, proto_sig_date, _format_cn_date(dt), keep_whitespace=True)
-        except ValueError as e:
-            log.warning("日期解析失败（%s），将直接使用原始字符串", e)
+        except Exception:
             _add_para(tpl, proto_sig_date, dt_raw, keep_whitespace=True)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
